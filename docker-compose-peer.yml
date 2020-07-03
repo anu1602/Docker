@@ -1,0 +1,98 @@
+version: '2.1'
+
+services:
+
+  rest-api:
+    build:
+      context: .
+      dockerfile: ./rest_api/Dockerfile
+    image: supply-rest-api
+    container_name: rest-api
+    ports:
+      - "8008:8008"
+    volumes:
+      - './rest_api/rest_api/:/project/supply_chain/sc_rest_api/'
+      - './addressing/:/project/supply_chain/sc_rest_api/addressing/'
+      - './protos/:/project/supply_chain/sc_rest_api/protogen/'
+    depends_on:
+      - postgres
+      - validator
+    command: |
+      bash -c "
+        cd /project/supply_chain/sc_rest_api/
+        python3 protogenerator.py
+        python3 main.py -vv --connect tcp://validator:4004 --bind rest-api:8008 --db-host postgres
+       "
+    stop_signal: SIGKILL
+
+  validator:
+    build:
+      context: ./sys_admin
+      dockerfile: Dockerfile
+    image: sawtooth-validator:1.0
+    container_name: sawtooth-validator-default
+    expose:
+      - 4004
+      - 8800
+    ports:
+      - "4004:4004"
+      - "8800:8800"
+    # start the validator with an empty genesis batch
+    entrypoint: "bash -c \"\
+        sawadm keygen && \
+        sawtooth keygen my_key && \
+        sawtooth-validator -vv \
+          --endpoint tcp://10.42.115.146:8800 \
+          --bind component:tcp://eth0:4004 \
+          --bind network:tcp://eth0:8800 \
+          --bind consensus:tcp://eth0:5050 \
+          --peers tcp://10.21.114.139:8800 \
+        \""
+
+  postgres:
+    image: postgres:alpine
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: sawtooth
+      POSTGRES_PASSWORD: sawtooth
+      POSTGRES_DB: simple-supply
+    ports:
+      - '5432:5432'
+
+  settings-tp:
+    image: hyperledger/sawtooth-settings-tp:1.0
+    container_name: sawtooth-settings-tp-default
+    depends_on:
+      - validator
+    entrypoint: settings-tp -vv -C tcp://validator:4004
+
+  sc-tp:
+    build:
+      context: .
+      dockerfile: ./supply_tp/Dockerfile
+    image: sc-tp:1.0
+    container_name: sc-tp-default
+    volumes:
+      - './supply_tp/sc_tp/:/project/supply_chain/sc_tp/'
+      - './addressing/:/project/supply_chain/sc_tp/addressing/'
+      - './protos/:/project/supply_chain/sc_tp/protogen'
+    depends_on:
+      - validator
+    command: |
+      bash -c "
+        cd /project/supply_chain/sc_tp
+        python3 protogenerator.py
+        chmod +x main.py
+        python3 main.py
+      "
+  poet-validator-registry-tp-0:
+    image: hyperledger/sawtooth-poet-validator-registry-tp:1.1
+    container_name: sawtooth-poet-validator-registry-tp-0
+    expose:
+      - 4004
+    command: poet-validator-registry-tp -C tcp://validator:4004
+    environment:
+      PYTHONPATH: /project/sawtooth-core/consensus/poet/common
+    stop_signal: SIGKILL
+
