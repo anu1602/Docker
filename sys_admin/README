@@ -1,0 +1,3 @@
+1. Dockerfile used by yaml for building validator with policy and validator.toml files installed
+
+2. You don't need to do anything here unless you want to add public keys of transactors in policy_1
