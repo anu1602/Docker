@@ -1,0 +1,148 @@
+version: "2.0"
+
+volumes:
+  postgresvol:
+
+services:
+  rest-api:
+    build:
+      context: .
+      dockerfile: ./rest_api/Dockerfile
+    image: supply-rest-api
+    container_name: rest-api
+    ports:
+      - "8008:8008"
+    volumes:
+      - "./rest_api/rest_api/:/home/anurag/Desktop/DCF/project/sc_rest_api/"
+      - "./addressing/:/home/anurag/Desktop/DCF/project/sc_rest_api/addressing/"
+      - "./protos/:/home/anurag/Desktop/DCF/project/sc_rest_api/protogen/"
+    depends_on:
+      - postgres
+      - validator
+    command: bash -c "
+      cd /home/anurag/Desktop/DCF/project/sc_rest_api/
+      python3 protogenerator.py
+      python3 main.py -vv --connect tcp://validator:4004 --bind rest_api:8008 --db-host postgress"
+    stop_signal: SIGKILL
+
+  validator:
+    build:
+      context: ./sys_admin
+      dockerfile: Dockerfile
+    image: sawtooth-validator:1.0
+    container_name: sawtooth-validator-default
+    expose:
+      - 4004
+      - 8800
+    volumes:
+      - "./backup/state/:/var/lib/sawtooth/"
+      - "./backup/keys/:/etc/sawtooth/keys/"
+    ports:
+      - "4004:4004"
+      - "8800:8800"
+    # start the validator with an empty genesis batch
+    entrypoint: "bash -c \"\
+      sawadm keygen && \
+      sawtooth keygen my_key && \
+      sawset genesis \
+      -k /etc/sawtooth/keys/validator.priv \
+      -o config-genesis.batch && \
+      sawset proposal create \
+      -k /etc/sawtooth/keys/validator.priv \
+      sawtooth.consensus.algorithm=poet \
+      sawtooth.poetreport_public_key_pem=\
+      \\\"$$(cat /etc/sawtooth/simulator_rk_pub.pem)\\\" \
+      sawtooth.poet.valid_enclave_measurements=$$(poet enclave measurements) \
+      sawtooth.poet.valid_enclave_basenames=$$(poet valid_enclave_basenames) \
+      -o config.batch && \
+      poet registration create -k /etc/sawtooth/keys/validator.priv -o poet.batch && \
+      sawadm genesis \
+      config-genesis.batch config.batch poet.batch && \
+      sawtooth-validator -vv \
+      --endpoint tcp://192.168.43.20:8800 \
+      --bind component:tcp://eth0:4004 \
+      --bind network:tcp://eth0:8800 \
+      --bind consensus:tcp://eth0:5050 \
+      --peers tcp://13.233.124.110:8800 \
+      \""
+  poet-validator-registry-tp-0:
+    image: hyperledger/sawtooth-poet-validator-registry-tp:1.1
+    container_name: sawtooth-poet-validator-registry-tp-0
+    expose:
+      - 4004
+    command: poet-validator-registry-tp -C tcp://validator:4004
+    environment:
+      PYTHONPATH: /project/sawtooth-core/consensus/poet/common
+    stop_signal: SIGKILL
+
+  postgres:
+    image: postgres:alpine
+    container_name: postgres
+    restart: always
+    volumes:
+      - "postgresvol:/var/lib/postgresql/data/"
+    environment:
+      POSTGRES_USER: sawtooth
+      POSTGRES_PASSWORD: sawtooth
+      POSTGRES_DB: simple-supply
+    ports:
+      - "5432:5432"
+
+  settings-tp:
+    image: hyperledger/sawtooth-settings-tp:1.0
+    container_name: sawtooth-settings-tp-default
+    depends_on:
+      - validator
+    entrypoint: settings-tp -vv -C tcp://validator:4004
+
+  sc-tp:
+    build:
+      context: .
+      dockerfile: ./supply_tp/Dockerfile
+    image: sc-tp:1.0
+    container_name: sc-tp-default
+    volumes:
+      - "./supply_tp/sc_tp/:/project/supply_chain/sc_tp/"
+      - "./addressing/:/project/supply_chain/sc_tp/addressing/"
+      - "./protos/:/project/supply_chain/sc_tp/protogen"
+    depends_on:
+      - validator
+    command: |
+      bash -c "
+        cd /project/supply_chain/sc_tp
+        python3 protogenerator.py
+        chmod +x main.py
+        python3 main.py
+        "
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:6.6.2
+    container_name: elasticsearch
+    environment:
+      - cluster.name=docker-cluster
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xms512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    # volumes:
+    # - esdata1:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+
+  webapp:
+    build:
+      context: .
+      dockerfile: ./webapp/Dockerfile
+    image: webapp_django-apache2:latest
+    container_name: django-apache2
+    ports:
+      - "8005:80"
+      - "3500:3500"
+      - "8006:81"
+    volumes:
+      - ./webapp/conf-file.conf:/etc/apache2/sites-available/000-default.conf
+      - ./webapp:/var/www/html/
+    depends_on:
+      - rest-api
